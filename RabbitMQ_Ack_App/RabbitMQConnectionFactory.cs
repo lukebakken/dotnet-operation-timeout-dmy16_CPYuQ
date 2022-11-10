@@ -62,6 +62,7 @@ namespace Rabbitmq_Ack_App
             try
             {
                 log.Info("Connection shutdown occured");
+                /*
                 if (Channel != null)
                 {
                     log.Info("Connection shutdown occured - Channel close and dispose initated");
@@ -70,6 +71,7 @@ namespace Rabbitmq_Ack_App
                     log.Info("Connection shutdown occured - Channel close and dispose completed");
 
                 }
+                */
                 connection = factory.CreateConnection();
                 factory.AutomaticRecoveryEnabled = true;
                 connection.ConnectionShutdown += Connection_ConnectionShutdown;
