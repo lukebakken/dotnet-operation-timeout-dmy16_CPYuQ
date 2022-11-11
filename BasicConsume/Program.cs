@@ -17,6 +17,7 @@ namespace BasicConsume
     public class ReceiveMsgs
     {
         private const string _queueName = "queueName";
+        private const string amqp_uri = "amqp://guest:guest@localhost:5672";
 
         private static IConnectionFactory _connectionFactory;
         private static IModel _consumerChannel;
@@ -24,13 +25,7 @@ namespace BasicConsume
         private static string _consumerTag = "";
         private static IBasicConsumer _consumer;
         static UTF8Encoding utfEncoding = new UTF8Encoding();
-        public static bool IsConnected => _consumerConnection != null && _consumerConnection.IsOpen;
 
-        private static string con = "amqp://guest:guest@localhost:5672";
-
-        private static int counter = 0;
-        private static int i = 0;
-        private static ulong messageCount = 10000000000;
         private static bool _shutdownRaised;
         private static bool _continuePublishing;
         public static ILog log = log4net.LogManager.GetLogger(typeof(ReceiveMsgs));
@@ -39,7 +34,7 @@ namespace BasicConsume
         {
             _connectionFactory = new ConnectionFactory
             {
-                Uri = new Uri(con),
+                Uri = new Uri(amqp_uri),
                 AutomaticRecoveryEnabled = true,
             };
         }
@@ -98,7 +93,6 @@ namespace BasicConsume
 
             if (!_shutdownRaised)
             {
-                counter++;
                 byte[] body = e.Body.ToArray();
                 var message = Encoding.UTF8.GetString(body);
                 _consumerChannel.BasicAck(deliveryTag: e.DeliveryTag, multiple: false);
@@ -106,74 +100,15 @@ namespace BasicConsume
             }
         }
 
-        public static async Task UnsubscribeAsync()
-        {
-            await Task.Run(() =>
-            {
-                if (!string.IsNullOrEmpty(_consumerTag))
-                {
-                    try
-                    {
-                        _consumerChannel.BasicCancel(_consumerTag);
-                        log.Info($"Unsubscribed with {_consumerTag} for {"queueName"}...");
-                    }
-                    catch (AlreadyClosedException ace)
-                    {
-                        log.Info(ace.ToString());
-                    }
-                    catch (OperationInterruptedException oie)
-                    {
-                        log.Info(oie.ToString());
-                    }
-                }
-                _consumerTag = null;
-            });
-        }
-
-        public static Task DisconnectAsync()
-        {
-            if (!IsConnected)
-            {
-                return Task.CompletedTask;
-            }
-            var connName = _consumerConnection.ClientProvidedName;
-            _consumerConnection.Close();
-            log.Info($"Closed connection for {connName}");
-            return Task.CompletedTask;
-        }
-
         public static void Consumer_Shutdown(object sender, ShutdownEventArgs e)
         {
             try
             {
-                Cleanup();
-                var mres = new ManualResetEventSlim(false); // state is initially false
-                while (!mres.Wait(3000)) // loop until state is true, checking every 3s
-                {
-                    try
-                    {
-                        StopPublishing();
-                        _consumerConnection = CreateConnection();
-                        CreateChannelAndConsume();
-                        _shutdownRaised = false;
-                        StartPublishing();
-                        log.Info("Connected!");
-                        mres.Set();
-                    }
-                    catch (Exception ex)
-                    {
-                        log.Error("Connect failed!", ex);
-                    }
-                }
-            }
-            catch (TimeoutException ex)
-            {
-                log.Info(e.ToString());
-                throw;
+                log.Warn("Consumer_Shutdown seen");
             }
             catch (Exception ex)
             {
-                log.Info(e.ToString());
+                log.Error("Consumer_Shutdown", ex);
                 throw;
             }
         }
@@ -198,7 +133,7 @@ namespace BasicConsume
                         {
                             var jsonObject1 = new JObject();
                             jsonObject1.Add("Type", 9);
-                            jsonObject1.Add("Message", $"Testing Purpose {i}");
+                            jsonObject1.Add("Message", $"Testing Purpose {publishCount}");
                             var message = new List<JObject>
                             {
                                 jsonObject1
@@ -219,36 +154,13 @@ namespace BasicConsume
             });
         }
 
-        private static void Cleanup()
-        {
-            try
-            {
-                if (_consumerChannel != null && _consumerChannel.IsOpen)
-                {
-                    _consumerChannel.Close();
-                    _consumerChannel = null;
-                }
-
-                if (_consumerConnection != null && _consumerConnection.IsOpen)
-                {
-                    _consumerConnection.Close();
-                    _consumerConnection = null;
-                    _consumerChannel = null;
-                }
-            }
-            catch (IOException ex)
-            {
-                log.Error(ex);
-            }
-        }
-
         public static void Main()
         {
             log4net.Config.XmlConfigurator.Configure();
             CreateConnectionFactory();
             _consumerConnection = CreateConnection();
             CreateChannelAndConsume();
-            PublishMsgs();
+            StartPublishing();
             log.Info(" Press [enter] to exit.");
             Console.ReadLine();
         }
