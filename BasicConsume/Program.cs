@@ -10,118 +10,98 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Web;
 using log4net;
 
 namespace BasicConsume
 {
     public class ReceiveMsgs
     {
-        private static IModel channel;
-        private static IConnection _connection;
+        private const string _queueName = "queueName";
+
+        private static IConnectionFactory _connectionFactory;
+        private static IModel _consumerChannel;
+        private static IConnection _consumerConnection;
         private static string _consumerTag = "";
         private static IBasicConsumer _consumer;
         static UTF8Encoding utfEncoding = new UTF8Encoding();
-        public static bool IsConnected => _connection != null && _connection.IsOpen;
-        private static CancellationTokenSource _dummyCancellationTokenSource;
+        public static bool IsConnected => _consumerConnection != null && _consumerConnection.IsOpen;
 
-        private static string con = $"amqp://guest:guest@localhost:5672";
+        private static string con = "amqp://guest:guest@localhost:5672";
 
         private static int counter = 0;
         private static int i = 0;
         private static ulong messageCount = 10000000000;
-        private static bool shutdownRaised;
+        private static bool _shutdownRaised;
+        private static bool _continuePublishing;
         public static ILog log = log4net.LogManager.GetLogger(typeof(ReceiveMsgs));
-        public static void CreateConnection()
+
+        public static void CreateConnectionFactory()
         {
-            Task connectionTask = null;
+            _connectionFactory = new ConnectionFactory
+            {
+                Uri = new Uri(con),
+                AutomaticRecoveryEnabled = true,
+            };
+        }
+
+        public static IConnection CreateConnection()
+        {
+            IConnection conn = null;
+
             try
             {
-                connectionTask = Task.Run(() =>
-                {
-                    var factory = new ConnectionFactory
-                    {
-                        Uri = new Uri(con),
-                        AutomaticRecoveryEnabled = true,
-                        Ssl =
-                    {
-                        Version = System.Security.Authentication.SslProtocols.Tls12,
-                        Enabled = false,
-                        AcceptablePolicyErrors =
-                            System.Net.Security.SslPolicyErrors.RemoteCertificateChainErrors
-                    }
-                    };
+                conn  = _connectionFactory.CreateConnection();
 
-
-                    _connection = factory.CreateConnection();
-                    _connection.ConnectionShutdown += (sender, args) =>
-                    {
-                        log.Info($"Lost connection to broker...{args}");
-                    };
-                    _connection.ConnectionBlocked += (sender, args) =>
-                    {
-                        log.Info($"Connection Blocked to broker...{args.Reason}");
-                    };
-                    log.Info($"Created new connection with name = {_connection.ClientProvidedName}");
-                });
-
-                connectionTask.Wait(TimeSpan.FromSeconds(10));
-            }
-            catch (AggregateException ae)
-            {
-                var brokerUnreachableException = ae.InnerExceptions[0];
-                if (brokerUnreachableException is BrokerUnreachableException)
+                conn.ConnectionShutdown += (sender, args) =>
                 {
-                    throw brokerUnreachableException;
-                }
-                else
+                    log.Info($"Lost connection to broker...{args}");
+                };
+
+                conn.ConnectionBlocked += (sender, args) =>
                 {
-                    log.Info(ae.Message);
-                    throw new BrokerUnreachableException(ae);
-                }
+                    log.Info($"Connection Blocked to broker...{args.Reason}");
+                };
+
+                log.Info($"Created new connection with name = {conn.ClientProvidedName}");
             }
             catch (Exception e)
             {
-                log.Info(e);
+                log.Error(e);
             }
 
-            if (!connectionTask.IsCompleted)
-            {
-                //  throw new TimeoutException();
-            }
+            return conn;
         }
 
-        private static async void StartListening()
+        public static void DeclareQueue(string queueName, IModel channel)
         {
-            await Task.Run(() =>
-            {
-                _consumerTag = channel.BasicConsume("queueName", false, _consumer);
-                log.Info($"StartListening completed with {_consumerTag} for {"queueName"}...");
-            });
+            QueueDeclareOk result = channel.QueueDeclare(queueName, true, false, false, null);
         }
-        public static void CreateChannel()
+
+        public static void CreateChannelAndConsume()
         {
-            channel = _connection.CreateModel();
-            channel.QueueDeclare("queueName", true, false, false, null);
-            var consumer = new EventingBasicConsumer(channel);
+            _consumerChannel = _consumerConnection.CreateModel();
+            DeclareQueue(_queueName, _consumerChannel);
+            var consumer = new EventingBasicConsumer(_consumerChannel);
             consumer.Received += Consumer_Received;
             consumer.Shutdown += Consumer_Shutdown;
             _consumer = consumer;
-            StartListening();
+            _consumerTag = _consumerChannel.BasicConsume("queueName", false, _consumer);
+            log.Info($"StartListening completed with {_consumerTag} for {"queueName"}...");
         }
+
         public static void Consumer_Received(object sender, BasicDeliverEventArgs e)
         {
-            if (channel.IsClosed)
+            if (_consumerChannel.IsClosed)
             {
-                shutdownRaised = true;
+                _shutdownRaised = true;
             }
 
-            if (!shutdownRaised)
+            if (!_shutdownRaised)
             {
                 counter++;
                 byte[] body = e.Body.ToArray();
                 var message = Encoding.UTF8.GetString(body);
-                channel.BasicAck(deliveryTag: e.DeliveryTag, multiple: false);
+                _consumerChannel.BasicAck(deliveryTag: e.DeliveryTag, multiple: false);
                 log.Info(" Acked "+ message);
             }
         }
@@ -134,7 +114,7 @@ namespace BasicConsume
                 {
                     try
                     {
-                        channel.BasicCancel(_consumerTag);
+                        _consumerChannel.BasicCancel(_consumerTag);
                         log.Info($"Unsubscribed with {_consumerTag} for {"queueName"}...");
                     }
                     catch (AlreadyClosedException ace)
@@ -149,18 +129,20 @@ namespace BasicConsume
                 _consumerTag = null;
             });
         }
+
         public static Task DisconnectAsync()
         {
             if (!IsConnected)
             {
                 return Task.CompletedTask;
             }
-            var connName = _connection.ClientProvidedName;
-            _connection.Close();
+            var connName = _consumerConnection.ClientProvidedName;
+            _consumerConnection.Close();
             log.Info($"Closed connection for {connName}");
             return Task.CompletedTask;
         }
-        public static async void Consumer_Shutdown(object sender, ShutdownEventArgs e)
+
+        public static void Consumer_Shutdown(object sender, ShutdownEventArgs e)
         {
             try
             {
@@ -170,33 +152,19 @@ namespace BasicConsume
                 {
                     try
                     {
-                        StopNotifyEventsTask(); // to stop publish
-                        CreateConnection();  // re create
-                        CreateChannel(); // re create 
-                                         // messageCount = 10000000;
-                        shutdownRaised = false;
-                        PublishMsgs();
+                        StopPublishing();
+                        _consumerConnection = CreateConnection();
+                        CreateChannelAndConsume();
+                        _shutdownRaised = false;
+                        StartPublishing();
                         log.Info("Connected!");
-                        mres.Set(); // state set to true - breaks out of loop
+                        mres.Set();
                     }
                     catch (Exception ex)
                     {
-                        log.Info("Connect failed!");
+                        log.Error("Connect failed!", ex);
                     }
                 }
-                //await Task.Run(async () =>
-                //{
-                //    StopNotifyEventsTask();
-                //    await UnsubscribeAsync();
-                //    await Task.Delay(10000);
-                //    await DisconnectAsync();
-                //    await Task.Delay(10000);
-                //    CreateConnection();
-                //    await Task.Delay(10000);
-                //    CreateChannel();
-                //    await Task.Delay(10000);
-                //    PublishMsgs();
-                //});
             }
             catch (TimeoutException ex)
             {
@@ -210,27 +178,24 @@ namespace BasicConsume
             }
         }
 
-        private static void StopNotifyEventsTask()
+        private static void StopPublishing()
         {
-            log.Info($"Stop Notify Events Task is invoked");
-            _dummyCancellationTokenSource?.Cancel();
+            log.Info($"StopPublishing is invoked");
+            _continuePublishing = false;
         }
-        public static void PublishMsgs()
+
+        public static void StartPublishing()
         {
-            _dummyCancellationTokenSource = new CancellationTokenSource();
-            //   var factory = new ConnectionFactory() { HostName = "localhost" };
-            //  using (var connection = factory.CreateConnection())
-            i = 0;
-            var pubChannel = _connection.CreateModel();
+            Task.Run(() =>
             {
-                pubChannel.QueueDeclare("queueName", true, false, false, null);
-                Task.Run(() =>
+                int publishCount = 0;
+                using (IConnection pubConn = _connectionFactory.CreateConnection())
                 {
-                    while (true)
+                    using (IModel pubChannel = _consumerConnection.CreateModel())
                     {
-                        if (!shutdownRaised)
+                        DeclareQueue(_queueName, pubChannel);
+                        while (true == _continuePublishing)
                         {
-                            i++;
                             var jsonObject1 = new JObject();
                             jsonObject1.Add("Type", 9);
                             jsonObject1.Add("Message", $"Testing Purpose {i}");
@@ -239,43 +204,50 @@ namespace BasicConsume
                                 jsonObject1
                             };
                             var body = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(message));
-                            log.Info($"Triggering event>> {body.ToString()}");
+
+                            if (publishCount % 100 == 0)
+                            {
+                                log.Info($"publish count: {publishCount}");
+                            }
+
                             pubChannel.BasicPublish("", "queueName", null, body);
+                            publishCount++;
                             Thread.Sleep(500);
                         }
                     }
-                }, _dummyCancellationTokenSource.Token);
-            }
-
+                }
+            });
         }
-        static void Cleanup()
+
+        private static void Cleanup()
         {
             try
             {
-                if (channel != null && channel.IsOpen)
+                if (_consumerChannel != null && _consumerChannel.IsOpen)
                 {
-                    channel.Close();
-                    channel = null;
+                    _consumerChannel.Close();
+                    _consumerChannel = null;
                 }
 
-                if (_connection != null && _connection.IsOpen)
+                if (_consumerConnection != null && _consumerConnection.IsOpen)
                 {
-                    _connection.Close();
-                    _connection = null;
-                    channel = null;
+                    _consumerConnection.Close();
+                    _consumerConnection = null;
+                    _consumerChannel = null;
                 }
             }
             catch (IOException ex)
             {
-                // Close() may throw an IOException if connection
-                // dies - but that's ok (handled by reconnect)
+                log.Error(ex);
             }
         }
+
         public static void Main()
         {
             log4net.Config.XmlConfigurator.Configure();
-            CreateConnection();
-            CreateChannel();
+            CreateConnectionFactory();
+            _consumerConnection = CreateConnection();
+            CreateChannelAndConsume();
             PublishMsgs();
             log.Info(" Press [enter] to exit.");
             Console.ReadLine();
